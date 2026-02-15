@@ -97,13 +97,58 @@ resource "aws_eks_cluster" "devopsshack" {
 }
 
 
+# IAM Role for EBS CSI Driver
+resource "aws_iam_role" "ebs_csi_driver_role" {
+  name = "ebs-csi-driver-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/${replace(aws_eks_cluster.devopsshack.identity[0].oidc[0].issuer, "https://", "")}"
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "${replace(aws_eks_cluster.devopsshack.identity[0].oidc[0].issuer, "https://", "")}:sub" = "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+            "${replace(aws_eks_cluster.devopsshack.identity[0].oidc[0].issuer, "https://", "")}:aud" = "sts.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "ebs-csi-driver-role"
+  }
+}
+
+# Attach the AWS managed policy for EBS CSI Driver
+resource "aws_iam_role_policy_attachment" "ebs_csi_driver_policy" {
+  role       = aws_iam_role.ebs_csi_driver_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
+# Update the EKS addon to use the IAM role
 resource "aws_eks_addon" "ebs_csi_driver" {
-  cluster_name    = aws_eks_cluster.devopsshack.name
-  addon_name      = "aws-ebs-csi-driver"
+  cluster_name                = aws_eks_cluster.devopsshack.name
+  addon_name                  = "aws-ebs-csi-driver"
+  service_account_role_arn    = aws_iam_role.ebs_csi_driver_role.arn
+  addon_version               = "v1.35.0-eksbuild.1"  # Use the latest compatible version
   
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
+
+  depends_on = [
+    aws_iam_role_policy_attachment.ebs_csi_driver_policy,
+    aws_eks_node_group.devopsshack
+  ]
 }
+
+# Data source to get AWS account ID
+data "aws_caller_identity" "current" {}
 
 
 resource "aws_eks_node_group" "devopsshack" {
